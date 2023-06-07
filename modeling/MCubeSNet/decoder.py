@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from modeling.sync_batchnorm.batchnorm import SynchronizedBatchNorm2d
-from modeling.RGFSConv import RGFSConv
+from modeling.MCubeSNet.RGFSConv import RGFSConv
 
 
 class Decoder(nn.Module):

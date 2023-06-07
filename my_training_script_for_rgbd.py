@@ -10,7 +10,7 @@ from dataloaders import make_data_loader, make_data_loader2
 from modeling.sync_batchnorm.replicate import patch_replication_callback
 from modeling.my_deeplab_impl import *
 # from modeling.my_deeplab_impl_3 import *
-from modeling.my_deeplab_impl_for_rgbd import *
+from modeling.nyudv2_model import *
 from utils.loss import SegmentationLosses
 from utils.calculate_weights import calculate_weigths_labels, calculate_weigths_labels_for_all
 from utils.lr_scheduler import LR_Scheduler
