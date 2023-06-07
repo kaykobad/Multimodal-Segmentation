@@ -62,7 +62,7 @@ class ToTensor(object):
         pol = np.array(pol).astype(np.float32).transpose((2, 0, 1))
         dolp = np.array(dolp).astype(np.float32)
         SS = np.array(SS).astype(np.float32)
-        nir = np.array(nir).astype(np.float32)
+        nir = np.array(nir).astype(np.float32).transpose((2, 0, 1))
         nir_mask = np.array(nir_mask).astype(np.float32)
         
         img = torch.from_numpy(img).float()
@@ -230,7 +230,9 @@ class RandomScaleCrop(object):
             mask_ = np.full((oh+padh,ow+padw),self.fill)
             mask_[:oh,:ow] = mask
             mask = mask_
-            nir_ = np.zeros((oh+padh,ow+padw))
+            # nir_ = np.zeros((oh+padh,ow+padw))
+            # nir_[:oh,:ow] = nir
+            nir_ = np.zeros((oh+padh, ow+padw, 3))
             nir_[:oh,:ow] = nir
             nir = nir_
             nir_mask_ = np.zeros((oh+padh,ow+padw))

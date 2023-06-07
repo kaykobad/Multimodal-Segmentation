@@ -6,7 +6,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from mypath import Path
 from torchvision import transforms
-from dataloaders import custom_transforms_multimodal as tr
+from dataloaders import mcubes_transforms as tr
 
 class MCubeSDataset(Dataset):
     NUM_CLASSES = 20
@@ -155,14 +155,14 @@ class MCubeSDataset(Dataset):
 
     def transform_val(self, sample):
         composed_transforms = transforms.Compose([
-            tr.FixScaleCrop(crop_size=1024),
+            tr.FixScaleCrop(crop_size=512),
             tr.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             tr.ToTensor()])
 
         return composed_transforms(sample)
 
     def __str__(self):
-        return 'KITTI_material_dataset(split=' + str(self.split) + ')'
+        return 'multimodal_material_segmentation_dataset(split=' + str(self.split) + ')'
 
 
 if __name__ == '__main__':

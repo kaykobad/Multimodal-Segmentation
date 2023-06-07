@@ -50,10 +50,14 @@ class Mask2DBlock(nn.Module):
         super(Mask2DBlock, self).__init__()
 
         self.mask2d = nn.Parameter(torch.ones((1, 1, shape[1], shape[2])), requires_grad=True)
+        # self.h = nn.Parameter(torch.ones((1, shape[1])), requires_grad=True)
+        # self.w = nn.Parameter(torch.ones((1, shape[2])), requires_grad=True)
         self.shape = shape
 
     def forward(self, x):
         x = torch.mul(x, self.mask2d)
+        # x = torch.mul(x, self.h.view(1, 1, -1, 1))
+        # x = torch.mul(x, self.w.view(1, 1, 1, -1))
         return x
 
 
