@@ -39,41 +39,25 @@ class MaskBlock(nn.Module):
         self.shape = shape
 
     def forward(self, x):
-        # f = torch.mul(torch.mul(self.c.view(1, -1, 1, 1), self.h.view(1, 1, -1, 1)), self.w.view(1, 1, 1, -1))
         x = torch.mul(x, self.c.view(1, -1, 1, 1))
         x = torch.mul(x, self.h.view(1, 1, -1, 1))
         x = torch.mul(x, self.w.view(1, 1, 1, -1))
-        # self.c.retain_grad()
-        # self.h.retain_grad()
-        # self.w.retain_grad()
-        # print(f.shape)
-        # x = torch.mul(x, f)
-        # print(x)
         return x
 
 
-class RegularizedMaskBlock(nn.Module):
+class Mask2DBlock(nn.Module):
     def __init__(self, shape=(256, 256, 256)):
-        super(RegularizedMaskBlock, self).__init__()
+        super(Mask2DBlock, self).__init__()
 
-        self.mask = nn.Parameter(torch.ones((1, 1, shape[1], shape[2])), requires_grad=True)
+        self.mask2d = nn.Parameter(torch.ones((1, 1, shape[1], shape[2])), requires_grad=True)
+        # self.h = nn.Parameter(torch.ones((1, shape[1])), requires_grad=True)
+        # self.w = nn.Parameter(torch.ones((1, shape[2])), requires_grad=True)
         self.shape = shape
 
     def forward(self, x):
-        x = torch.mul(x, self.mask)
-        return x
-
-
-class RegularizedSEMaskBlock(nn.Module):
-    def __init__(self, channel, shape):
-        super(RegularizedSEMaskBlock, self).__init__()
-
-        self.se = SEBlock(channel=channel)
-        self.mask = RegularizedMaskBlock(shape=shape)
-
-    def forward(self, x):
-        x = self.se(x)
-        x = self.mask(x)
+        x = torch.mul(x, self.mask2d)
+        # x = torch.mul(x, self.h.view(1, 1, -1, 1))
+        # x = torch.mul(x, self.w.view(1, 1, 1, -1))
         return x
 
 
@@ -83,6 +67,19 @@ class SEMaskBlock(nn.Module):
 
         self.se = SEBlock(channel=channel)
         self.mask = MaskBlock(shape=shape)
+
+    def forward(self, x):
+        x = self.se(x)
+        x = self.mask(x)
+        return x
+
+
+class SEMask2DBlock(nn.Module):
+    def __init__(self, channel, shape):
+        super(SEMask2DBlock, self).__init__()
+
+        self.se = SEBlock(channel=channel)
+        self.mask = Mask2DBlock(shape=shape)
 
     def forward(self, x):
         x = self.se(x)
@@ -296,7 +293,8 @@ class ResNet(nn.Module):
 
     def _load_pretrained_model(self):
         if self.weight == 'resnet101':
-            pretrain_dict = model_zoo.load_url('https://download.pytorch.org/models/resnet101-5d3b4d8f.pth')
+            # pretrain_dict = model_zoo.load_url('https://download.pytorch.org/models/resnet101-5d3b4d8f.pth')
+            pretrain_dict = model_zoo.load_url('https://download.pytorch.org/models/resnet101-cd907fc2.pth')
         elif self.weight == 'resnet50':
             pretrain_dict = model_zoo.load_url('https://download.pytorch.org/models/resnet50-11ad3fa6.pth')
         elif self.weight == 'resnet34':
@@ -506,61 +504,6 @@ def build_decoder(num_classes, backbone, BatchNorm, num_modalities=1):
     return Decoder(num_classes, backbone, BatchNorm, num_modalities)
 
 
-class DecoderWithSEMask(nn.Module):
-    def __init__(self, num_classes, backbone, BatchNorm, num_modalities=1):
-        super(DecoderWithSEMask, self).__init__()
-        if backbone == 'resnet' or backbone == 'drn':
-            low_level_inplanes = 256
-            last_conv_input = 48 + 256
-        else:
-            raise NotImplementedError
-
-        self.low_level_feature_shape = (last_conv_input, 128, 128)
-        self.semask = SEMaskBlock(last_conv_input, self.low_level_feature_shape)
-
-        self.conv1 = nn.Conv2d(low_level_inplanes, 48, 1, bias=False)
-        self.bn1 = BatchNorm(48)
-        self.relu = nn.ReLU()
-        self.last_conv = nn.Sequential(nn.Conv2d(last_conv_input, 256, kernel_size=3, stride=1, padding=1, bias=False),
-                                       BatchNorm(256),
-                                       nn.ReLU(),
-                                       nn.Dropout(0.5),
-                                       nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=False),
-                                       BatchNorm(256),
-                                       nn.ReLU(),
-                                       nn.Dropout(0.1),
-                                       nn.Conv2d(256, num_classes, kernel_size=1, stride=1))
-        self._init_weight()
-
-
-    def forward(self, x, low_level_feat):
-        low_level_feat = self.conv1(low_level_feat)
-        low_level_feat = self.bn1(low_level_feat)
-        low_level_feat = self.relu(low_level_feat)
-
-        x = F.interpolate(x, size=low_level_feat.size()[2:], mode='bilinear', align_corners=True)
-        x = torch.cat((x, low_level_feat), dim=1)
-
-        x = self.semask(x)
-        x = self.last_conv(x)
-
-        return x
-
-    def _init_weight(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                torch.nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, SynchronizedBatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-
-def build_decoder_with_semask(num_classes, backbone, BatchNorm, num_modalities=1):
-    return DecoderWithSEMask(num_classes, backbone, BatchNorm, num_modalities)
-
-
 # norm = 'avg' -> Average / 'bn' -> BatchNorm / 'bnr' -> BatchNorm + ReLU
 class MMDeepLabSEMaskWithNormForRGBD(nn.Module):
     def __init__(self, 
@@ -605,7 +548,7 @@ class MMDeepLabSEMaskWithNormForRGBD(nn.Module):
 
         if self.use_depth:
             self.num_modalities += 1
-            self.depth_backbone = build_backbone(backbone, output_stride, BatchNorm, input_dim=1, pretrained=False)
+            self.depth_backbone = build_backbone(backbone, output_stride, BatchNorm, input_dim=3, pretrained=True)
             self.depth_aspp = build_aspp(backbone, output_stride, BatchNorm)
             self.depth_llf = SEMaskBlock(self.low_level_feature_channels, self.low_level_feature_shape)
             self.depth_hlf = SEMaskBlock(self.high_level_feature_channels, self.high_level_feature_shape)
@@ -713,7 +656,7 @@ class MMDeepLabSEMaskWithNormForRGBD(nn.Module):
                                 yield p
 
 
-class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
+class MMDeepLabSEMask2DWithNormForRGBD(nn.Module):
     def __init__(self, 
         backbone='resnet', 
         output_stride=16, 
@@ -724,7 +667,7 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
         use_depth=False,
         norm='avg',
     ): 
-        super(MMDeepLabRegularizedSEMaskWithNormForRGBD, self).__init__()
+        super(MMDeepLabSEMask2DWithNormForRGBD, self).__init__()
         self.use_rgb = use_rgb
         self.use_depth = use_depth
         self.freeze_bn = freeze_bn
@@ -749,17 +692,17 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
             self.num_modalities += 1
             self.rgb_backbone = build_backbone(backbone, output_stride, BatchNorm)
             self.rgb_aspp = build_aspp(backbone, output_stride, BatchNorm)
-            self.rgb_llf = RegularizedSEMaskBlock(self.low_level_feature_channels, self.low_level_feature_shape)
-            self.rgb_hlf = RegularizedSEMaskBlock(self.high_level_feature_channels, self.high_level_feature_shape)
+            self.rgb_llf = SEMask2DBlock(self.low_level_feature_channels, self.low_level_feature_shape)
+            self.rgb_hlf = SEMask2DBlock(self.high_level_feature_channels, self.high_level_feature_shape)
             self.backbones.extend([self.rgb_backbone, self.rgb_llf, self.rgb_hlf])
             self.decoders.append(self.rgb_aspp)
 
         if self.use_depth:
             self.num_modalities += 1
-            self.depth_backbone = build_backbone(backbone, output_stride, BatchNorm, input_dim=1, pretrained=False)
+            self.depth_backbone = build_backbone(backbone, output_stride, BatchNorm, input_dim=3, pretrained=True)
             self.depth_aspp = build_aspp(backbone, output_stride, BatchNorm)
-            self.depth_llf = RegularizedSEMaskBlock(self.low_level_feature_channels, self.low_level_feature_shape)
-            self.depth_hlf = RegularizedSEMaskBlock(self.high_level_feature_channels, self.high_level_feature_shape)
+            self.depth_llf = SEMask2DBlock(self.low_level_feature_channels, self.low_level_feature_shape)
+            self.depth_hlf = SEMask2DBlock(self.high_level_feature_channels, self.high_level_feature_shape)
             self.backbones.extend([self.depth_backbone, self.depth_llf, self.depth_hlf])
             self.decoders.append(self.depth_aspp)
 
@@ -780,8 +723,6 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
 
         self.decoder = build_decoder(num_classes, backbone, BatchNorm, num_modalities=self.num_modalities)
         self.decoders.append(self.decoder)
-        self.hlf_mask = 0
-        self.llf_mask = 0
 
     def forward(self, rgb=None, depth=None):
         active_modalities = 0
@@ -797,8 +738,6 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
             x = x1
             low_level_feat = low_level_feat1
             active_modalities += 1
-            self.hlf_mask = self.rgb_hlf.mask.mask
-            self.llf_mask = self.rgb_llf.mask.mask
 
         if self.use_depth and depth is not None:
             x2, low_level_feat2 = self.depth_backbone(depth)
@@ -808,13 +747,9 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
             if self.use_rgb and rgb is not None:
                 x = torch.add(x, x2)
                 low_level_feat = torch.add(low_level_feat, low_level_feat2)
-                self.hlf_mask = self.hlf_mask + self.depth_hlf.mask.mask
-                self.llf_mask = self.llf_mask + self.depth_llf.mask.mask
             else:
                 x = x2
                 low_level_feat = low_level_feat2
-                self.hlf_mask = self.depth_hlf.mask.mask
-                self.llf_mask = self.depth_llf.mask.mask
             active_modalities += 1 
 
         # print("X1 and X shape:", x1.shape, x.shape)
@@ -830,9 +765,7 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
         x = self.decoder(x, low_level_feat)
         x = F.interpolate(x, size=rgb.size()[2:] if self.use_rgb else depth.size()[2:], mode='bilinear', align_corners=True)
 
-        regularization_term = torch.pow(torch.sum(self.hlf_mask) - (self.high_level_feature_shape[1]*self.high_level_feature_shape[2]), 2) + torch.pow(torch.sum(self.llf_mask) - (self.low_level_feature_shape[1]*self.low_level_feature_shape[2]), 2)
-
-        return x, regularization_term
+        return x
 
     def freeze_bn(self):
         for m in self.modules():
@@ -852,7 +785,7 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
                                 yield p
                 else:
                     if isinstance(m[1], nn.Conv2d) or isinstance(m[1], SynchronizedBatchNorm2d) \
-                            or isinstance(m[1], nn.BatchNorm2d) or isinstance(m[1], RegularizedSEMaskBlock):
+                            or isinstance(m[1], nn.BatchNorm2d) or isinstance(m[1], SEMask2DBlock):
                         for p in m[1].parameters():
                             if p.requires_grad:
                                 yield p
@@ -868,7 +801,7 @@ class MMDeepLabRegularizedSEMaskWithNormForRGBD(nn.Module):
                                 yield p
                 else:
                     if isinstance(m[1], nn.Conv2d) or isinstance(m[1], SynchronizedBatchNorm2d) \
-                            or isinstance(m[1], nn.BatchNorm2d) or isinstance(m[1], RegularizedSEMaskBlock):
+                            or isinstance(m[1], nn.BatchNorm2d) or isinstance(m[1], SEMask2DBlock):
                         for p in m[1].parameters():
                             if p.requires_grad:
                                 yield p

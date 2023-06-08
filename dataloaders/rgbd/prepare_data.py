@@ -30,11 +30,11 @@ def prepare_data(args, ckpt_dir=None, with_input_orig=True, split=None):
     #     Dataset = SUNRGBD
     #     dataset_kwargs = {}
     #     valid_set = 'test'
-    if args.dataset == 'nyudv2':
+    if args.dataset == 'nyuv2':
         Dataset = NYUv2
         dataset_kwargs = {'n_classes': 40}
         valid_set = 'test'
-        args.dataset_dir = './datasets/nyudv2/'
+        args.dataset_dir = './datasets/nyuv2/'
     # elif args.dataset == 'cityscapes':
     #     Dataset = Cityscapes
     #     dataset_kwargs = {

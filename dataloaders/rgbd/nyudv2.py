@@ -39,6 +39,7 @@ class NYUv2Base:
     DEPTH_DIR = 'depth'
     DEPTH_RAW_DIR = 'depth_raw'
     RGB_DIR = 'rgb'
+    HHA_DIR = 'hha_dd'
 
     LABELS_DIR_FMT = 'labels_{:d}'
     LABELS_COLORED_DIR_FMT = 'labels_{:d}_colored'
@@ -443,6 +444,9 @@ class NYUv2(NYUv2Base, DatasetBase):
 
     def load_image(self, idx):
         return self._load(self.RGB_DIR, self._filenames[idx])
+
+    def load_hha(self, idx):
+        return self._load(self.HHA_DIR, self._filenames[idx])
 
     def load_depth(self, idx):
         if self._depth_mode == 'raw':

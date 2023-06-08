@@ -26,12 +26,12 @@ def get_preprocessor(depth_mean,
 
     if phase == 'train':
         transform_list = [
-            # RandomRescale(train_random_rescale),
-            # RandomCrop(crop_height=height, crop_width=width),
+            RandomRescale(train_random_rescale),
+            RandomCrop(crop_height=height, crop_width=width),
             # RandomHSV((0.9, 1.1),
             #           (0.9, 1.1),
             #           (25, 25)),
-            # RandomFlip(),
+            RandomFlip(),
             ToTensor(),
             Normalize(depth_mean=depth_mean,
                       depth_std=depth_std,
@@ -60,15 +60,18 @@ class Rescale:
         self.width = width
 
     def __call__(self, sample):
-        image, depth = sample['image'], sample['depth']
+        image, depth, hha = sample['image'], sample['depth'], sample['hha']
 
         image = cv2.resize(image, (self.width, self.height),
                            interpolation=cv2.INTER_LINEAR)
         depth = cv2.resize(depth, (self.width, self.height),
                            interpolation=cv2.INTER_NEAREST)
+        hha = cv2.resize(hha, (self.width, self.height),
+                           interpolation=cv2.INTER_LINEAR)
 
         sample['image'] = image
         sample['depth'] = depth
+        sample['hha'] = hha
 
         if 'label' in sample:
             label = sample['label']
@@ -85,7 +88,7 @@ class RandomRescale:
         self.scale_high = max(scale)
 
     def __call__(self, sample):
-        image, depth, label = sample['image'], sample['depth'], sample['label']
+        image, depth, label, hha = sample['image'], sample['depth'], sample['label'], sample['hha']
 
         target_scale = np.random.uniform(self.scale_low, self.scale_high)
         # (H, W, C)
@@ -98,10 +101,13 @@ class RandomRescale:
                            interpolation=cv2.INTER_NEAREST)
         label = cv2.resize(label, (target_width, target_height),
                            interpolation=cv2.INTER_NEAREST)
+        hha = cv2.resize(hha, (target_width, target_height),
+                           interpolation=cv2.INTER_LINEAR)
 
         sample['image'] = image
         sample['depth'] = depth
         sample['label'] = label
+        sample['hha'] = hha
 
         return sample
 
@@ -113,7 +119,7 @@ class RandomCrop:
         self.rescale = Rescale(self.crop_height, self.crop_width)
 
     def __call__(self, sample):
-        image, depth, label = sample['image'], sample['depth'], sample['label']
+        image, depth, label, hha = sample['image'], sample['depth'], sample['label'], sample['hha']
         h = image.shape[0]
         w = image.shape[1]
         if h <= self.crop_height or w <= self.crop_width:
@@ -125,9 +131,11 @@ class RandomCrop:
             image = image[i:i + self.crop_height, j:j + self.crop_width, :]
             depth = depth[i:i + self.crop_height, j:j + self.crop_width]
             label = label[i:i + self.crop_height, j:j + self.crop_width]
+            hha = hha[i:i + self.crop_height, j:j + self.crop_width, :]
             sample['image'] = image
             sample['depth'] = depth
             sample['label'] = label
+            sample['hha'] = hha
         return sample
 
 
@@ -163,15 +171,17 @@ class RandomHSV:
 
 class RandomFlip:
     def __call__(self, sample):
-        image, depth, label = sample['image'], sample['depth'], sample['label']
+        image, depth, label, hha = sample['image'], sample['depth'], sample['label'], sample['hha']
         if np.random.rand() > 0.5:
             image = np.fliplr(image).copy()
             depth = np.fliplr(depth).copy()
             label = np.fliplr(label).copy()
+            hha = np.fliplr(hha).copy()
 
         sample['image'] = image
         sample['depth'] = depth
         sample['label'] = label
+        sample['hha'] = hha
 
         return sample
 
@@ -184,10 +194,13 @@ class Normalize:
         self._depth_std = [depth_std]
 
     def __call__(self, sample):
-        image, depth = sample['image'], sample['depth']
-        image = image / 255
+        image, depth, hha = sample['image'], sample['depth'], sample['hha']
+        image = image / 255.0
         image = torchvision.transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(image)
+        hha = hha / 255.0
+        hha = torchvision.transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(hha)
         if self._depth_mode == 'raw':
             depth_0 = depth == 0
 
@@ -203,18 +216,21 @@ class Normalize:
 
         sample['image'] = image
         sample['depth'] = depth
+        sample['hha'] = hha
 
         return sample
 
 
 class ToTensor:
     def __call__(self, sample):
-        image, depth = sample['image'], sample['depth']
+        image, depth, hha = sample['image'], sample['depth'], sample['hha']
         image = image.transpose((2, 0, 1))
+        hha = hha.transpose((2, 0, 1))
         depth = np.expand_dims(depth, 0).astype('float32')
 
         sample['image'] = torch.from_numpy(image).float()
         sample['depth'] = torch.from_numpy(depth).float()
+        sample['hha'] = torch.from_numpy(hha).float()
 
         if 'label' in sample:
             label = sample['label']

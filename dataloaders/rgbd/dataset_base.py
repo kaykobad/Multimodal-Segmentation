@@ -35,8 +35,9 @@ class DatasetBase(abc.ABC, Dataset):
     def __getitem__(self, idx):
         sample = {'image': self.load_image(idx),
                   'depth': self.load_depth(idx),
-                  'label': self.load_label(idx)}
-
+                  'label': self.load_label(idx),
+                  'hha': self.load_hha(idx)}
+        
         if self.split != 'train':
             # needed to compute mIoU on original image size
             sample['label_orig'] = sample['label'].copy()
@@ -45,8 +46,13 @@ class DatasetBase(abc.ABC, Dataset):
             sample['image_orig'] = sample['image'].copy()
             sample['depth_orig'] = sample['depth'].copy().astype('float32')
             sample['label_orig'] = sample['label'].copy()
+            sample['hha_orig'] = sample['hha'].copy()
 
         sample = self.preprocessor(sample)
+        sample['depth3'] = sample['depth'].repeat(3, 1, 1)
+        # print(sample['dapth3'].shape, sample['image'].shape)
+        # print(type(sample['dapth3']), type(sample['image']))
+        # fff
 
         return sample
 
@@ -121,6 +127,10 @@ class DatasetBase(abc.ABC, Dataset):
 
     @abc.abstractmethod
     def load_image(self, idx):
+        pass
+
+    @abc.abstractmethod
+    def load_hha(self, idx):
         pass
 
     @abc.abstractmethod

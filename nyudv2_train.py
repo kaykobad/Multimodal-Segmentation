@@ -8,8 +8,6 @@ from mypath import Path
 from dataloaders.rgbd.prepare_data import prepare_data
 from dataloaders import make_data_loader, make_data_loader2
 from modeling.sync_batchnorm.replicate import patch_replication_callback
-from modeling.my_deeplab_impl import *
-# from modeling.my_deeplab_impl_3 import *
 from modeling.nyudv2_model import *
 from utils.loss import SegmentationLosses
 from utils.calculate_weights import calculate_weigths_labels, calculate_weigths_labels_for_all
@@ -17,6 +15,8 @@ from utils.lr_scheduler import LR_Scheduler
 from utils.saver import Saver
 from utils.summaries import TensorboardSummary
 from utils.metrics import Evaluator, ConfusionMatrix
+from dataloaders.datasets.nyudv2_dataloader import get_data_loader
+from dataloaders.datasets.nyudv2_dataset import RGBXDataset
 
 
 class TrainerMultimodalRGBD(object):
@@ -36,27 +36,12 @@ class TrainerMultimodalRGBD(object):
         self.train_loader, self.test_loader = prepare_data(args, ckpt_dir=None)
         self.nclass = self.train_loader.dataset.n_classes_without_void
 
+        # kwargs = {'num_workers': args.workers, 'pin_memory': True}
+        # self.train_loader, self.test_loader = get_data_loader(RGBXDataset, args.batch_size)
+        # self.nclass = 40
+
         # calculate_weigths_labels_for_all(self.train_loader, self.test_loader, num_classes=self.nclass)
 
-        # f
-
-        # model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.train_loader.dataset.n_classes,
-        #                 backbone=args.backbone,
-        #                 output_stride=args.out_stride,
-        #                 sync_bn=args.sync_bn,
-        #                 freeze_bn=args.freeze_bn,
-        #                 use_rgb=args.use_rgb,
-        #                 use_depth=args.use_depth,
-        #                 norm=args.norm)
-
-        # model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.nclass,
-        #                 backbone=args.backbone,
-        #                 output_stride=args.out_stride,
-        #                 sync_bn=args.sync_bn,
-        #                 freeze_bn=args.freeze_bn,
-        #                 use_rgb=args.use_rgb,
-        #                 use_depth=args.use_depth,
-        #                 norm=args.norm)
         # model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.nclass,
         #                 backbone=args.backbone,
         #                 output_stride=args.out_stride,
@@ -66,7 +51,7 @@ class TrainerMultimodalRGBD(object):
         #                 use_depth=args.use_depth,
         #                 norm=args.norm)
 
-        model = MMDeepLabRegularizedSEMaskWithNormForRGBD(num_classes=self.nclass,
+        model = MMDeepLabSEMask2DWithNormForRGBD(num_classes=self.nclass,
                         backbone=args.backbone,
                         output_stride=args.out_stride,
                         sync_bn=args.sync_bn,
@@ -78,11 +63,8 @@ class TrainerMultimodalRGBD(object):
         print(model)
         pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print("Total Parameters:", pytorch_total_params)
-
-        self.lambda_param = torch.nn.Parameter(torch.tensor(1.0))
                         
         train_params = [{'params': model.get_1x_lr_params(), 'lr': args.lr},
-                        {'params': self.lambda_param, 'lr': args.lr},
                         {'params': model.get_10x_lr_params(), 'lr': args.lr*10}]
         
         # Define Optimizer
@@ -161,14 +143,15 @@ class TrainerMultimodalRGBD(object):
         self.evaluator.reset()
         # self.confmat.reset()
         for i, sample in enumerate(tbar):
-            image, target, depth = sample['image'], sample['label'], sample['depth']
+            image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
+            # image, target, depth = sample['data'], sample['label'], sample['modal_x']
 
             if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
                 depth = depth.unsqueeze(1)
                 # print(depth.shape)
 
             if self.args.cuda:
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
+                image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
 
             self.scheduler(self.optimizer, i, epoch, self.best_pred)
             self.optimizer.zero_grad()
@@ -177,8 +160,9 @@ class TrainerMultimodalRGBD(object):
             depth = depth if self.args.use_depth else None
             
             with torch.cuda.amp.autocast():
-                output, reg_loss = self.model(rgb=rgb, depth=depth)
-                loss = self.criterion(output, target) + self.lambda_param * reg_loss
+                # print(hha.shape)
+                output = self.model(rgb=rgb, depth=depth3)
+                loss = self.criterion(output, target)
                 # loss = self.criterion(output, target.long())
                 # print(loss)
             scaler.scale(loss).backward()
@@ -250,22 +234,24 @@ class TrainerMultimodalRGBD(object):
         test_loss = 0.0
         output_all = None
         for i, sample in enumerate(tbar):
-            image, target, depth = sample['image'], sample['label'], sample['depth']
+            image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
+            # image, target, depth = sample['data'], sample['label'], sample['modal_x']
 
             if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
                 depth = depth.unsqueeze(1)
                 # print(depth.shape)
 
             if self.args.cuda:
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
+                image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
 
             rgb = image if self.args.use_rgb else None
             depth = depth if self.args.use_depth else None
 
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
-                    output, reg_loss = self.model(rgb=rgb, depth=depth)
-                    loss = self.criterion(output, target) + self.lambda_param * reg_loss
+                    # print(hha.shape)
+                    output = self.model(rgb=rgb, depth=depth3)
+                    loss = self.criterion(output, target)
                     # loss = self.criterion(output, target.long())
                     # loss = self.criterion(output, target)
             test_loss += loss.item()
@@ -338,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument('--out-stride', type=int, default=16,
                         help='network output stride (default: 8)')
     parser.add_argument('--dataset', type=str, default='pascal',
-                        choices=['nyudv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
+                        choices=['nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
                         help='dataset name (default: pascal)')
     parser.add_argument('--model-name', type=str, default='DeeplabV3Plus-Unnamed',
                         help='Modle name for wandb and checkpoint (default: pascal)')
@@ -519,7 +505,7 @@ if __name__ == "__main__":
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
-    # wandb.init(project="Material-Segmentation-MCubeS", entity="kaykobad", name=args.model_name)
+    wandb.init(project="Material-Segmentation-MCubeS", entity="kaykobad", name=args.model_name)
 
     trainer = TrainerMultimodalRGBD(args)
     # if args.is_multimodal:
@@ -536,7 +522,7 @@ if __name__ == "__main__":
         log_data.update(log_data_2)
         log_data_2 = trainer.test(epoch)
         log_data.update(log_data_2)
-        # wandb.log(log_data)
+        wandb.log(log_data)
 
     trainer.writer.close()
     print(args)
