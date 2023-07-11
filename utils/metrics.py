@@ -21,6 +21,9 @@ class Evaluator(object):
         return Acc
 
     def Mean_Intersection_over_Union(self, ignore_index=None):
+        # a = np.diag(self.confusion_matrix)
+        # b = np.sum(self.confusion_matrix, axis=1) + np.sum(self.confusion_matrix, axis=0) - np.diag(self.confusion_matrix)
+        # print("MIOU Call: ", a, b)
         MIoU = np.diag(self.confusion_matrix) / (
                     np.sum(self.confusion_matrix, axis=1) + np.sum(self.confusion_matrix, axis=0) -
                     np.diag(self.confusion_matrix))
@@ -67,7 +70,7 @@ class Evaluator(object):
         self.confusion_matrix += self._generate_matrix(gt_image, pre_image)
 
     def reset(self):
-        self.confusion_matrix = np.zeros((self.num_class,) * 2)
+        self.confusion_matrix = np.zeros((self.num_class,)*2)
 
 
 class M_IOU(object):

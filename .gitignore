@@ -8,3 +8,4 @@ modeling/sync_batchnorm/__pycache__/
 utils/__pycache__/
 wandb/
 output*.txt
+predictions/

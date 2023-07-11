@@ -23,6 +23,10 @@ class Path(object):
             return './path/to/datasets/coco/'
         elif dataset == 'nyuv2':
             return './datasets/nyuv2/'
+        elif dataset == 'NYUDepthv2':
+            return './datasets/NYUDepthv2/'
+        elif dataset == 'SmallDataset':
+            return './datasets/SmallDataset/'
         else:
             print('Dataset {} not available.'.format(dataset))
             raise NotImplementedError

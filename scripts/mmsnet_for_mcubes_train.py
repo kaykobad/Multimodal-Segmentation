@@ -5,24 +5,18 @@ import numpy as np
 from tqdm import tqdm
 import random
 from mypath import Path
-from torch.utils.data import DataLoader
-from dataloaders.rgbd.prepare_data import prepare_data
 from dataloaders import make_data_loader, make_data_loader2
 from modeling.sync_batchnorm.replicate import patch_replication_callback
-from modeling.nyudv2_model import *
+from modeling.mmsnet import *
 from utils.loss import SegmentationLosses
-from utils.calculate_weights import calculate_weigths_labels, calculate_weigths_labels_for_all
+from utils.calculate_weights import calculate_weigths_labels
 from utils.lr_scheduler import LR_Scheduler
 from utils.saver import Saver
 from utils.summaries import TensorboardSummary
-from utils.metrics import Evaluator, ConfusionMatrix
-# from dataloaders.datasets.nyudv2_dataloader import get_data_loader
-# from dataloaders.datasets.nyudv2_dataset import RGBXDataset
-from dataloaders.nyudv2_cmnext_transforms import get_train_augmentation, get_val_augmentation
-from dataloaders.datasets.nyudv2_cmnext_dataset import NYU
+from utils.metrics import Evaluator
 
 
-class TrainerMultimodalRGBD(object):
+class TrainerMultimodal(object):
     def __init__(self, args):
         self.args = args
 
@@ -36,48 +30,41 @@ class TrainerMultimodalRGBD(object):
         
         # Define Dataloader
         kwargs = {'num_workers': args.workers, 'pin_memory': True}
-        # self.train_loader, self.test_loader = prepare_data(args, ckpt_dir=None)
-        # self.nclass = self.train_loader.dataset.n_classes_without_void
-        traintransform = get_train_augmentation([480, 640], seg_fill=255)
-        valtransform = get_val_augmentation([480, 640])
+        self.train_loader, self.val_loader, self.test_loader, self.nclass = make_data_loader2(args, **kwargs)
 
-        trainset = NYU("datasets/NYUDepthv2", 'train', traintransform, ['img', 'depth'])
-        valset = NYU("datasets/NYUDepthv2", 'val', valtransform, ['img', 'depth'])
-
-        self.train_loader = DataLoader(trainset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=True, drop_last=True)
-        self.test_loader = DataLoader(valset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=False)
-        self.nclass = 40
-
-        # kwargs = {'num_workers': args.workers, 'pin_memory': True}
-        # self.train_loader, self.test_loader = get_data_loader(RGBXDataset, args.batch_size)
-        # self.nclass = 40
-
-        # calculate_weigths_labels_for_all(self.train_loader, self.test_loader, num_classes=self.nclass)
-
-        model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.nclass,
-                        backbone=args.backbone,
-                        output_stride=args.out_stride,
-                        sync_bn=args.sync_bn,
-                        freeze_bn=args.freeze_bn,
-                        use_rgb=args.use_rgb,
-                        use_depth=args.use_depth,
-                        norm=args.norm)
-
-        # model = MMDeepLabSEMask2DWithNormForRGBD(num_classes=self.nclass,
+        # model = MMDeepLabSEMaskWithNorm(num_classes=20,
         #                 backbone=args.backbone,
         #                 output_stride=args.out_stride,
         #                 sync_bn=args.sync_bn,
         #                 freeze_bn=args.freeze_bn,
-        #                 use_rgb=args.use_rgb,
-        #                 use_depth=args.use_depth,
+        #                 use_nir=args.use_nir,
+        #                 use_aolp=args.use_aolp,
+        #                 use_dolp=args.use_dolp,
+        #                 use_pol=args.use_pol,
+        #                 use_segmap=args.use_segmap,
+        #                 enable_se=args.enable_se,
         #                 norm=args.norm)
 
+        model = MMSNetForMCubeS(num_classes=20,
+                        backbone=args.backbone,
+                        output_stride=args.out_stride,
+                        sync_bn=args.sync_bn,
+                        freeze_bn=args.freeze_bn,
+                        use_nir=args.use_nir,
+                        use_pol=args.use_pol,
+                        norm=args.norm)
+
         print(model)
-        pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print("Total Parameters:", pytorch_total_params)
+        # for name, param in model.named_parameters():
+        #     print(name, param.requires_grad)
+        # print(list(model.parameters()))
+        # ex
                         
         train_params = [{'params': model.get_1x_lr_params(), 'lr': args.lr},
                         {'params': model.get_10x_lr_params(), 'lr': args.lr*10}]
+
+        # while True:
+        #     print(next(train_params[0]['params']))
         
         # Define Optimizer
         optimizer = torch.optim.SGD(train_params, momentum=args.momentum, nesterov=args.nesterov)
@@ -85,7 +72,6 @@ class TrainerMultimodalRGBD(object):
         # Define Criterion
         # whether to use class balanced weights
         if args.use_balanced_weights:
-            print("Calculating Class Weights...")
             classes_weights_path = os.path.join(Path.db_root_dir(args.dataset), args.dataset+'_classes_weights.npy')
             if os.path.isfile(classes_weights_path):
                 weight = np.load(classes_weights_path)
@@ -95,26 +81,15 @@ class TrainerMultimodalRGBD(object):
         else:
             weight = None
 
-        # n_classes_without_void = self.train_loader.dataset.n_classes_without_void
-        # if args.class_weighting != 'None':
-        #     class_weighting = self.train_loader.dataset.compute_class_weights(weight_mode=args.class_weighting, c=args.c_for_logarithmic_weighting)
-        # else:
-        #     class_weighting = np.ones(self.train_loader.dataset.n_classes_without_void)
-        # class_weighting = torch.tensor(class_weighting).float()
-        # print(class_weighting.shape, class_weighting)
-
+        # self.criterion = SegmentationLosses(weight=weight, cuda=args.cuda, ignore_index=0).build_loss(mode=args.loss_type)
         self.criterion = SegmentationLosses(weight=weight, cuda=args.cuda).build_loss(mode=args.loss_type)
-        # self.criterion = nn.CrossEntropyLoss(weight=class_weighting, ignore_index=args.ignore_index).cuda()
-        # self.criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_index, reduction='mean').cuda()
         self.model, self.optimizer = model, optimizer
         
         # Define Evaluator
         self.evaluator = Evaluator(self.nclass)
-        # self.confmat = ConfusionMatrix(num_classes=self.train_loader.dataset.n_classes, average=None)
 
         # Define lr scheduler
-        self.scheduler = LR_Scheduler(args.lr_scheduler, args.lr,
-                                            args.epochs, len(self.train_loader))
+        self.scheduler = LR_Scheduler(args.lr_scheduler, args.lr, args.epochs, len(self.train_loader))
 
         # Using cuda
         if args.cuda:
@@ -122,6 +97,7 @@ class TrainerMultimodalRGBD(object):
             print("Total GPU Available: ", torch.cuda.device_count())
             self.model = torch.nn.DataParallel(self.model, device_ids=self.args.gpu_ids)
             self.model = self.model.cuda()
+            
 
         # Resuming checkpoint
         self.best_pred = 0.0
@@ -152,37 +128,42 @@ class TrainerMultimodalRGBD(object):
         tbar = tqdm(self.train_loader)
         num_img_tr = len(self.train_loader)
         scaler = torch.cuda.amp.GradScaler()
-        self.evaluator.reset()
-        # self.confmat.reset()
-        for i, (images, labels) in enumerate(tbar):
-            # image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
-            # image, target, depth = sample['data'], sample['label'], sample['modal_x']
-            image, target, depth = images[0], labels, images[1]
+        for i, sample in enumerate(tbar):
+            image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = \
+                sample['image'], sample['label'], sample['aolp'], sample['dolp'], sample['nir'], sample['nir_mask'], sample['u_map'], sample['v_map'], sample['mask'], sample['pol']
 
-            if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
-                depth = depth.unsqueeze(1)
-                # print(depth.shape)
+            # ------------------ My Modification Start --------------------------
+            if len(dolp.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                dolp = dolp.unsqueeze(1)
+                # print(dolp.shape)
+            if len(nir.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                nir = nir.unsqueeze(1)
+                # print(nir.shape)
+            if len(mask.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                mask = mask.unsqueeze(1)
+                # print(nir.shape)
+            # ------------------ My Modification End --------------------------
 
             if self.args.cuda:
-                # image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
-
+                image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = image.cuda(), target.cuda(), aolp.cuda(), dolp.cuda(), nir.cuda(), nir_mask.cuda(), u_map.cuda(), v_map.cuda(), mask.cuda(), pol.cuda()
             self.scheduler(self.optimizer, i, epoch, self.best_pred)
             self.optimizer.zero_grad()
-
-            rgb = image if self.args.use_rgb else None
-            depth = depth if self.args.use_depth else None
+            aolp = aolp if self.args.use_aolp else None
+            dolp = dolp if self.args.use_dolp else None
+            nir  = nir  if self.args.use_nir else None
+            segmap = mask if self.args.use_segmap else None
+            nir_mask = nir_mask if self.args.use_nir else None
+            pol = pol if self.args.use_pol else None
             
             with torch.cuda.amp.autocast():
-                # print(hha.shape)
-                output = self.model(rgb=rgb, depth=depth)
-                loss = self.criterion(output, target)
-                # loss = self.criterion(output, target.long())
-                # print(loss)
+                output = self.model(image, nir=nir, pol=pol)
+                loss = self.criterion(output, target, nir_mask)
+
             scaler.scale(loss).backward()
             scaler.step(self.optimizer)
             scaler.update()
             train_loss += loss.item()
+
             tbar.set_description('Train loss: %.3f' % (train_loss / (i + 1)))
             self.writer.add_scalar('train/total_loss_iter', loss.item(), i + num_img_tr * epoch)
 
@@ -192,24 +173,18 @@ class TrainerMultimodalRGBD(object):
             pred = np.argmax(pred, axis=1)
             # Add batch sample into evaluator
             self.evaluator.add_batch(target_, pred)
-            # self.confmat.update((output, target.long()))
             # -------------------- My Modification End ----------------------
 
             # Show 10 * 3 inference results each epoch
-            # if i % (num_img_tr // 10) == 0:
-            #     global_step = i + num_img_tr * epoch
-            #     self.summary.visualize_image(self.writer, self.args.dataset, image[0], target, output, global_step)
+            if i % (num_img_tr // 10) == 0:
+                global_step = i + num_img_tr * epoch
+                self.summary.visualize_image(self.writer, self.args.dataset, image[0], target, output, global_step)
 
         # -------------------- My Modification Start ----------------------
         Acc = self.evaluator.Pixel_Accuracy()
         Acc_class = self.evaluator.Pixel_Accuracy_Class()
         mIoU = self.evaluator.Mean_Intersection_over_Union()
         FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union()
-        # mIoU = self.evaluator.Mean_Intersection_over_Union(ignore_index=args.ignore_index)
-        # mIoU2 = self.confmat.miou(ignore_index=args.ignore_index)
-        # FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union(ignore_index=args.ignore_index)
-
-        # print(">>>>>>> Old MIOU:", mIoU, "New MIOU:", mIoU2)
 
         log_data = {
             "Train Loss": train_loss,
@@ -240,36 +215,132 @@ class TrainerMultimodalRGBD(object):
         # -------------------- My Modification End ----------------------
 
 
-    def test(self, epoch):
+    def validation(self, epoch):
         self.model.eval()
         self.evaluator.reset()
-        # self.confmat.reset()
-        tbar = tqdm(self.test_loader, desc='\r')
+        tbar = tqdm(self.val_loader, desc='\r')
         test_loss = 0.0
-        output_all = None
-        for i, (images, labels) in enumerate(tbar):
-            # image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
-            # image, target, depth = sample['data'], sample['label'], sample['modal_x']
-            image, target, depth = images[0], labels, images[1]
-
-            if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
-                depth = depth.unsqueeze(1)
-                # print(depth.shape)
-
+        for i, sample in enumerate(tbar):
+            image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = \
+                sample['image'], sample['label'], sample['aolp'], sample['dolp'], sample['nir'], sample['nir_mask'], sample['u_map'], sample['v_map'], sample['mask'], sample['pol']
             if self.args.cuda:
-                # image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
+                image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = image.cuda(), target.cuda(), aolp.cuda(), dolp.cuda(), nir.cuda(), nir_mask.cuda(), u_map.cuda(), v_map.cuda(), mask.cuda(), pol.cuda()
 
-            rgb = image if self.args.use_rgb else None
-            depth = depth if self.args.use_depth else None
+            # ------------------ My Modification Start --------------------------
+            if len(dolp.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                dolp = dolp.unsqueeze(1)
+                # print(dolp.shape)
+            if len(nir.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                nir = nir.unsqueeze(1)
+                # print(nir.shape)
+            if len(mask.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                mask = mask.unsqueeze(1)
+                # print(nir.shape)
+            # ------------------ My Modification End --------------------------
+
+            aolp = aolp if self.args.use_aolp else None
+            dolp = dolp if self.args.use_dolp else None
+            nir  = nir  if self.args.use_nir else None
+            segmap = mask if self.args.use_segmap else None
+            nir_mask = nir_mask if self.args.use_nir else None
+            pol = pol if self.args.use_pol else None
 
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
-                    # print(hha.shape)
-                    output = self.model(rgb=rgb, depth=depth)
-                    loss = self.criterion(output, target)
-                    # loss = self.criterion(output, target.long())
-                    # loss = self.criterion(output, target)
+                    output = self.model(image, nir=nir, pol=pol)
+                    loss = self.criterion(output, target, nir_mask)
+
+            test_loss += loss.item()
+            tbar.set_description('Val loss: %.3f' % (test_loss / (i + 1)))
+            pred = output.data.cpu().numpy()
+            target_ = target.cpu().numpy()
+            pred = np.argmax(pred, axis=1)
+            # Add batch sample into evaluator
+            self.evaluator.add_batch(target_, pred)
+
+        # Fast test during the training
+        Acc = self.evaluator.Pixel_Accuracy()
+        Acc_class = self.evaluator.Pixel_Accuracy_Class()
+        mIoU = self.evaluator.Mean_Intersection_over_Union()
+        FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union()
+        self.writer.add_scalar('val/total_loss_epoch', test_loss, epoch)
+        self.writer.add_scalar('val/mIoU', mIoU, epoch)
+        self.writer.add_scalar('val/Acc', Acc, epoch)
+        self.writer.add_scalar('val/Acc_class', Acc_class, epoch)
+        self.writer.add_scalar('val/fwIoU', FWIoU, epoch)
+
+        # -------------------- My Modification Start ----------------------
+        log_data = {
+            "Validation Loss": test_loss,
+            "Validation mIoU": mIoU,
+            "Validation Pixel Acc": Acc,
+            "Validation Pixel Acc_class": Acc_class,
+            "Validation FWIoU": FWIoU,
+        }
+        # -------------------- My Modification End ----------------------
+
+        global_step = epoch
+        self.summary.visualize_validation_image(self.writer, self.args.dataset, image[0], target, output, global_step)
+        
+        print('Validation:')
+        print('[Epoch: %d, numImages: %5d]' % (epoch, i * self.args.batch_size + image[0].data.shape[0]))
+        print("Acc:{}, Acc_class:{}, mIoU:{}, fwIoU: {}".format(Acc, Acc_class, mIoU, FWIoU))
+        print('Loss: %.3f' % test_loss)
+
+        new_pred = mIoU
+        l_data = self.test(epoch)
+        log_data.update(l_data)
+        if new_pred > self.best_pred:
+            is_best = True
+            self.best_pred = new_pred
+            self.saver.save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': self.model.module.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'best_pred': self.best_pred,
+            }, is_best, filename=f"{args.model_name}_best_val.pth.tar")
+
+        # -------------------- My Modification Start ----------------------
+        return log_data
+        # -------------------- My Modification End ----------------------
+
+    def test(self, epoch):
+        self.model.eval()
+        self.evaluator.reset()
+        tbar = tqdm(self.test_loader, desc='\r')
+        test_loss = 0.0
+        output_all = None
+        for i, sample in enumerate(tbar):
+            image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = \
+                sample['image'], sample['label'], sample['aolp'], sample['dolp'], sample['nir'], sample['nir_mask'], \
+                sample['u_map'], sample['v_map'], sample['mask'], sample['pol']
+            if self.args.cuda:
+                image, target, aolp, dolp, nir, nir_mask, u_map, v_map, mask, pol = image.cuda(), target.cuda(), aolp.cuda(), dolp.cuda(), nir.cuda(), nir_mask.cuda(), u_map.cuda(), v_map.cuda(), mask.cuda(), pol.cuda()
+
+            # ------------------ My Modification Start --------------------------
+            if len(dolp.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                dolp = dolp.unsqueeze(1)
+                # print(dolp.shape)
+            if len(nir.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                nir = nir.unsqueeze(1)
+                # print(nir.shape)
+            if len(mask.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
+                mask = mask.unsqueeze(1)
+                # print(nir.shape)
+            # ------------------ My Modification End --------------------------
+
+            aolp = aolp if self.args.use_aolp else None
+            dolp = dolp if self.args.use_dolp else None
+            nir  = nir  if self.args.use_nir else None
+            segmap = mask if self.args.use_segmap else None
+            nir_mask = nir_mask if self.args.use_nir else None
+            pol = pol if self.args.use_pol else None
+
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    output = self.model(image, nir=nir, pol=pol)
+                    loss = self.criterion(output, target, nir_mask)
+                    
             test_loss += loss.item()
             tbar.set_description('Test loss: %.3f' % (test_loss / (i + 1)))
             pred = output.data.cpu().numpy()
@@ -281,22 +352,17 @@ class TrainerMultimodalRGBD(object):
                 output_all = torch.cat((output_all,output.cpu().clone()),dim=0)
             # Add batch sample into evaluator
             self.evaluator.add_batch(target_, pred)
-            # self.confmat.update((output, target.long()))
 
         # Fast test during the training
         Acc = self.evaluator.Pixel_Accuracy()
         Acc_class = self.evaluator.Pixel_Accuracy_Class()
         mIoU = self.evaluator.Mean_Intersection_over_Union()
         FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union()
-        # mIoU = self.evaluator.Mean_Intersection_over_Union(ignore_index=args.ignore_index)
-        # mIoU2 = self.confmat.miou(ignore_index=args.ignore_index)
-        # FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union(ignore_index=args.ignore_index)
         self.writer.add_scalar('test/total_loss_epoch', test_loss, epoch)
         self.writer.add_scalar('test/mIoU', mIoU, epoch)
         self.writer.add_scalar('test/Acc', Acc, epoch)
         self.writer.add_scalar('test/Acc_class', Acc_class, epoch)
         self.writer.add_scalar('test/fwIoU', FWIoU, epoch)
-        # print(">>>>>> Old MIOU:", mIoU, "New MIOU:", mIoU2)
 
         # -------------------- My Modification Start ----------------------
         log_data = {
@@ -309,7 +375,7 @@ class TrainerMultimodalRGBD(object):
         # -------------------- My Modification End ----------------------
 
         global_step = epoch
-        # self.summary.visualize_test_image(self.writer, self.args.dataset, image[0], target, output, global_step)
+        self.summary.visualize_test_image(self.writer, self.args.dataset, image[0], target, output, global_step)
         
         print('Test:')
         print('[Epoch: %d, numImages: %5d]' % (epoch, i * self.args.batch_size + image[0].data.shape[0]))
@@ -317,9 +383,8 @@ class TrainerMultimodalRGBD(object):
         print('Loss: %.3f' % test_loss)
 
         new_pred = mIoU
-        if new_pred > self.best_pred_2:
+        if new_pred > self.best_pred:
             is_best = True
-            self.best_pred_2 = new_pred
             self.best_pred = new_pred
             self.saver.save_checkpoint({
                 'epoch': epoch + 1,
@@ -335,12 +400,12 @@ class TrainerMultimodalRGBD(object):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PyTorch DeeplabV3Plus Training")
     parser.add_argument('--backbone', type=str, default='resnet',
-                        choices=['resnet', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'xception', 'drn', 'mobilenet', 'resnet_adv', 'xception_adv','resnet_condconv'],
+                        choices=['resnet', 'xception', 'drn', 'mobilenet', 'resnet_adv', 'xception_adv','resnet_condconv'],
                         help='backbone name (default: resnet)')
     parser.add_argument('--out-stride', type=int, default=16,
                         help='network output stride (default: 8)')
     parser.add_argument('--dataset', type=str, default='pascal',
-                        choices=['NYUDepthv2', 'nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
+                        choices=['pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
                         help='dataset name (default: pascal)')
     parser.add_argument('--model-name', type=str, default='DeeplabV3Plus-Unnamed',
                         help='Modle name for wandb and checkpoint (default: pascal)')
@@ -421,10 +486,6 @@ if __name__ == "__main__":
                         help='use nir')
     parser.add_argument('--use-pol', action='store_true', default=False,
                         help='use pol')
-    parser.add_argument('--use-rgb', action='store_true', default=False,
-                        help='use rgb')
-    parser.add_argument('--use-depth', action='store_true', default=False,
-                        help='use depth')
     parser.add_argument('--use-segmap', action='store_true', default=False,
                         help='use segmap')
     parser.add_argument('--enable-se', action='store_true', default=False,
@@ -436,38 +497,9 @@ if __name__ == "__main__":
                         help='use multihead architecture')
     parser.add_argument('--norm', type=str, default='avg',
                         help='avg, bn or bnr')
-    parser.add_argument('--dataset_dir',
-                        default=None,
-                        help='Path to dataset root.',)
-    parser.add_argument('--modality', type=str, default='rgbd', choices=['rgbd', 'rgb', 'depth'])
-    parser.add_argument('--raw-depth', action='store_true', default=False,
-                        help='Whether to use the raw depth values instead of'
-                        'the refined depth values')
-    parser.add_argument('--aug-scale-min', default=1.0, type=float,
-                        help='the minimum scale for random rescaling the '
-                        'training data.')
-    parser.add_argument('--aug-scale-max', default=1.4, type=float,
-                        help='the maximum scale for random rescaling the '
-                        'training data.')
-    parser.add_argument('--height', type=int, default=480,
-                        help='height of the training images. '
-                        'Images will be resized to this height.')
-    parser.add_argument('--width', type=int, default=640,
-                        help='width of the training images. '
-                        'Images will be resized to this width.')
-    parser.add_argument('--class-weighting', type=str,
-                        default='median_frequency',
-                        choices=['median_frequency', 'logarithmic', 'None'],
-                        help='which weighting mode to use for weighting the '
-                        'classes of the unbalanced dataset'
-                        'for the loss function during training.')
-    parser.add_argument('--ignore-index', default=0, type=int, help='index to ignore during the evaluation (mIoU) of the experiment')
 
     # ------------------- Wandb -------------------
     args = parser.parse_args()
-    args.valid_full_res = False
-    args.batch_size_valid = args.batch_size
-    args.c_for_logarithmic_weighting = 1.02
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     if args.cuda:
         try:
@@ -523,10 +555,7 @@ if __name__ == "__main__":
 
     wandb.init(project="Material-Segmentation-MCubeS", entity="kaykobad", name=args.model_name)
 
-    trainer = TrainerMultimodalRGBD(args)
-    # if args.is_multimodal:
-    #     print("USE Multimodal Model")
-    #     trainer = TrainerMultimodal(args)
+    trainer = TrainerMultimodal(args)
     
     print('Starting Epoch:', trainer.args.start_epoch)
     print('Total Epoches:', trainer.args.epochs)
@@ -536,8 +565,10 @@ if __name__ == "__main__":
         }
         log_data_2 = trainer.training(epoch)
         log_data.update(log_data_2)
-        log_data_2 = trainer.test(epoch)
-        log_data.update(log_data_2)
+        if not trainer.args.no_val and epoch % args.eval_interval == (args.eval_interval - 1):
+            # log_data_2 = trainer.validation(epoch)
+            log_data_2 = trainer.test(epoch)
+            log_data.update(log_data_2)
         wandb.log(log_data)
 
     trainer.writer.close()

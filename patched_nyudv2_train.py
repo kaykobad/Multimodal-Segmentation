@@ -7,9 +7,9 @@ import random
 from mypath import Path
 from torch.utils.data import DataLoader
 from dataloaders.rgbd.prepare_data import prepare_data
-from dataloaders import make_data_loader, make_data_loader2
+# from dataloaders import make_data_loader, make_data_loader2
 from modeling.sync_batchnorm.replicate import patch_replication_callback
-from modeling.nyudv2_model import *
+from modeling.mmsnet import *
 from utils.loss import SegmentationLosses
 from utils.calculate_weights import calculate_weigths_labels, calculate_weigths_labels_for_all
 from utils.lr_scheduler import LR_Scheduler
@@ -18,9 +18,11 @@ from utils.summaries import TensorboardSummary
 from utils.metrics import Evaluator, ConfusionMatrix
 # from dataloaders.datasets.nyudv2_dataloader import get_data_loader
 # from dataloaders.datasets.nyudv2_dataset import RGBXDataset
-from dataloaders.nyudv2_cmnext_transforms import get_train_augmentation, get_val_augmentation
-from dataloaders.datasets.nyudv2_cmnext_dataset import NYU
+from dataloaders.nyudv2_cmnext_transforms import get_patched_train_augmentation, get_val_augmentation
+from dataloaders.datasets.patched_nyudv2_cmnext_dataset import PatchedNYU
 
+model_path = "run/SmallDataset/MMSNetAttn/experiment_0/Patched-NYU-P64-B64-RGB-Avg-R50_best_test.pth.tar"
+# model_path = "run/SmallDataset/MMSNetAttn/experiment_1/Patched-NYU-P64-B64-RGB+HHA-Avg-R50_best_test.pth.tar"
 
 class TrainerMultimodalRGBD(object):
     def __init__(self, args):
@@ -38,11 +40,11 @@ class TrainerMultimodalRGBD(object):
         kwargs = {'num_workers': args.workers, 'pin_memory': True}
         # self.train_loader, self.test_loader = prepare_data(args, ckpt_dir=None)
         # self.nclass = self.train_loader.dataset.n_classes_without_void
-        traintransform = get_train_augmentation([480, 640], seg_fill=255)
-        valtransform = get_val_augmentation([480, 640])
+        traintransform = get_patched_train_augmentation([64, 64], seg_fill=255)
+        valtransform = get_val_augmentation([64, 64])
 
-        trainset = NYU("datasets/NYUDepthv2", 'train', traintransform, ['img', 'depth'])
-        valset = NYU("datasets/NYUDepthv2", 'val', valtransform, ['img', 'depth'])
+        trainset = PatchedNYU("datasets/SmallDataset", 'train', traintransform, ['img', 'depth'])
+        valset = PatchedNYU("datasets/SmallDataset", 'val', valtransform, ['img', 'depth'])
 
         self.train_loader = DataLoader(trainset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=True, drop_last=True)
         self.test_loader = DataLoader(valset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=False)
@@ -54,7 +56,7 @@ class TrainerMultimodalRGBD(object):
 
         # calculate_weigths_labels_for_all(self.train_loader, self.test_loader, num_classes=self.nclass)
 
-        model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.nclass,
+        model = MMSNetForPatchedRGBD(num_classes=self.nclass,
                         backbone=args.backbone,
                         output_stride=args.out_stride,
                         sync_bn=args.sync_bn,
@@ -63,18 +65,18 @@ class TrainerMultimodalRGBD(object):
                         use_depth=args.use_depth,
                         norm=args.norm)
 
-        # model = MMDeepLabSEMask2DWithNormForRGBD(num_classes=self.nclass,
-        #                 backbone=args.backbone,
-        #                 output_stride=args.out_stride,
-        #                 sync_bn=args.sync_bn,
-        #                 freeze_bn=args.freeze_bn,
-        #                 use_rgb=args.use_rgb,
-        #                 use_depth=args.use_depth,
-        #                 norm=args.norm)
-
         print(model)
         pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print("Total Parameters:", pytorch_total_params)
+
+        ## Decoder Freeze Start
+        for name, p in model.decoder.named_parameters():
+            p.requires_grad = False
+            # print(name, p)
+        
+        pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print("Total Learnable Parameters After Decoder Freeze:", pytorch_total_params)
+        ## Decoder Freeze End
                         
         train_params = [{'params': model.get_1x_lr_params(), 'lr': args.lr},
                         {'params': model.get_10x_lr_params(), 'lr': args.lr*10}]
@@ -123,9 +125,13 @@ class TrainerMultimodalRGBD(object):
             self.model = torch.nn.DataParallel(self.model, device_ids=self.args.gpu_ids)
             self.model = self.model.cuda()
 
+        ## Load Checkpoint Start
+        checkpoint = torch.load(model_path)
+        self.model.module.load_state_dict(checkpoint['state_dict'])
+        ## Load Checkpoint End
+
         # Resuming checkpoint
         self.best_pred = 0.0
-        self.best_pred_2 = 0.0
         
         if args.resume is not None:
             if not os.path.isfile(args.resume):
@@ -141,6 +147,21 @@ class TrainerMultimodalRGBD(object):
             self.best_pred = checkpoint['best_pred']
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
+        # if True:
+        #     model_path = "run/SmallDataset/MMSNetAttn/experiment_0/MMSNetAttn-NYU-P64-B64-RGB-Avg-R50_best_test.pth.tar"
+        #     if not os.path.isfile(model_path):
+        #         raise RuntimeError("=> no checkpoint found at '{}'" .format(args.resume))
+        #     checkpoint = torch.load(model_path)
+        #     args.start_epoch = checkpoint['epoch']
+        #     if args.cuda:
+        #         self.model.module.load_state_dict(checkpoint['state_dict'])
+        #     else:
+        #         self.model.load_state_dict(checkpoint['state_dict'])
+        #     if not args.ft:
+        #         self.optimizer.load_state_dict(checkpoint['optimizer'])
+        #     self.best_pred = checkpoint['best_pred']
+        #     print("=> loaded checkpoint '{}' (epoch {})"
+        #           .format(args.resume, checkpoint['epoch']))
 
         # Clear start epoch if fine-tuning
         if args.ft:
@@ -317,9 +338,8 @@ class TrainerMultimodalRGBD(object):
         print('Loss: %.3f' % test_loss)
 
         new_pred = mIoU
-        if new_pred > self.best_pred_2:
+        if new_pred > self.best_pred:
             is_best = True
-            self.best_pred_2 = new_pred
             self.best_pred = new_pred
             self.saver.save_checkpoint({
                 'epoch': epoch + 1,
@@ -340,7 +360,7 @@ if __name__ == "__main__":
     parser.add_argument('--out-stride', type=int, default=16,
                         help='network output stride (default: 8)')
     parser.add_argument('--dataset', type=str, default='pascal',
-                        choices=['NYUDepthv2', 'nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
+                        choices=['SmallDataset', 'NYUDepthv2', 'nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
                         help='dataset name (default: pascal)')
     parser.add_argument('--model-name', type=str, default='DeeplabV3Plus-Unnamed',
                         help='Modle name for wandb and checkpoint (default: pascal)')
@@ -521,7 +541,7 @@ if __name__ == "__main__":
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
-    wandb.init(project="Material-Segmentation-MCubeS", entity="kaykobad", name=args.model_name)
+    wandb.init(project="PatchedSegmentation", entity="kaykobad", name=args.model_name)
 
     trainer = TrainerMultimodalRGBD(args)
     # if args.is_multimodal:

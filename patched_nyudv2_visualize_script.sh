@@ -7,26 +7,24 @@
 #SBATCH --cpus-per-task=16
 #SBATCH -p batch
 #SBATCH --output=output_%j-%N.txt # logging per job and per host in the current directory. Both stdout and stderr are logged
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 
 conda activate mml
 
-CUDA_VISIBLE_DEVICES=0,1 python nyudv2_train.py \
-  --backbone resnet101 \
+CUDA_VISIBLE_DEVICES=0 python patched_nyudv2_visualize.py \
+  --backbone resnet50 \
   --lr 0.05 \
-  --workers 1 \
-  --epochs 500 \
-  --batch-size 8 \
-  --ratio 3 \
-  --gpu-ids 0,1 \
-  --checkname MMSNet \
-  --model-name MMSNet-New-NYU40-B8-RGB+HHA-Avg-R101 \
+  --workers 2 \
+  --epochs 1 \
+  --batch-size 1 \
+  --gpu-ids 0 \
+  --pth-path ./run/multimodal_dataset/MCubeSNet/experiment_10/checkpoint-latest-pytorch.pth.tar \
   --eval-interval 1 \
+  --ratio 3 \
   --loss-type ce \
-  --dataset NYUDepthv2 \
+  --dataset SmallDataset \
   --list-folder list_folder \
   --use-pretrained-resnet \
   --is-multimodal \
-  --norm avg \
   --use-rgb \
-  --use-depth 
+  --norm avg 

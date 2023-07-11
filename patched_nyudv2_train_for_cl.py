@@ -5,11 +5,12 @@ import numpy as np
 from tqdm import tqdm
 import random
 from mypath import Path
+from pytorch_metric_learning import losses
 from torch.utils.data import DataLoader
 from dataloaders.rgbd.prepare_data import prepare_data
-from dataloaders import make_data_loader, make_data_loader2
+# from dataloaders import make_data_loader, make_data_loader2
 from modeling.sync_batchnorm.replicate import patch_replication_callback
-from modeling.nyudv2_model import *
+from modeling.mmsnet import *
 from utils.loss import SegmentationLosses
 from utils.calculate_weights import calculate_weigths_labels, calculate_weigths_labels_for_all
 from utils.lr_scheduler import LR_Scheduler
@@ -18,11 +19,13 @@ from utils.summaries import TensorboardSummary
 from utils.metrics import Evaluator, ConfusionMatrix
 # from dataloaders.datasets.nyudv2_dataloader import get_data_loader
 # from dataloaders.datasets.nyudv2_dataset import RGBXDataset
-from dataloaders.nyudv2_cmnext_transforms import get_train_augmentation, get_val_augmentation
-from dataloaders.datasets.nyudv2_cmnext_dataset import NYU
+from dataloaders.nyudv2_cmnext_transforms_for_cl import get_patched_train_augmentation, get_val_augmentation
+from dataloaders.datasets.patched_nyudv2_cmnext_dataset_for_cl import PatchedNYUForCL
 
+# model_path = "run/SmallDataset/MMSNetAttn/experiment_0/Patched-NYU-P64-B64-RGB-Avg-R50_best_test.pth.tar"
+model_path = "run/SmallDataset/MMSNetAttn/experiment_1/Patched-NYU-P64-B64-RGB+HHA-Avg-R50_best_test.pth.tar"
 
-class TrainerMultimodalRGBD(object):
+class TrainerMultimodalRGBDForCL(object):
     def __init__(self, args):
         self.args = args
 
@@ -38,11 +41,11 @@ class TrainerMultimodalRGBD(object):
         kwargs = {'num_workers': args.workers, 'pin_memory': True}
         # self.train_loader, self.test_loader = prepare_data(args, ckpt_dir=None)
         # self.nclass = self.train_loader.dataset.n_classes_without_void
-        traintransform = get_train_augmentation([480, 640], seg_fill=255)
-        valtransform = get_val_augmentation([480, 640])
+        traintransform = get_patched_train_augmentation([64, 64], seg_fill=255)
+        valtransform = get_val_augmentation([64, 64])
 
-        trainset = NYU("datasets/NYUDepthv2", 'train', traintransform, ['img', 'depth'])
-        valset = NYU("datasets/NYUDepthv2", 'val', valtransform, ['img', 'depth'])
+        trainset = PatchedNYUForCL("datasets/SmallDataset", 'train', traintransform)
+        valset = PatchedNYUForCL("datasets/SmallDataset", 'val', valtransform)
 
         self.train_loader = DataLoader(trainset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=True, drop_last=True)
         self.test_loader = DataLoader(valset, batch_size=args.batch_size, num_workers=2, pin_memory=False, shuffle=False)
@@ -54,23 +57,25 @@ class TrainerMultimodalRGBD(object):
 
         # calculate_weigths_labels_for_all(self.train_loader, self.test_loader, num_classes=self.nclass)
 
-        model = MMDeepLabSEMaskWithNormForRGBD(num_classes=self.nclass,
+        teacher_model = MMSNetForPatchedRGBDForCL(num_classes=self.nclass,
                         backbone=args.backbone,
                         output_stride=args.out_stride,
                         sync_bn=args.sync_bn,
                         freeze_bn=args.freeze_bn,
                         use_rgb=args.use_rgb,
                         use_depth=args.use_depth,
-                        norm=args.norm)
+                        norm=args.norm,
+                        is_teacher=True)
 
-        # model = MMDeepLabSEMask2DWithNormForRGBD(num_classes=self.nclass,
-        #                 backbone=args.backbone,
-        #                 output_stride=args.out_stride,
-        #                 sync_bn=args.sync_bn,
-        #                 freeze_bn=args.freeze_bn,
-        #                 use_rgb=args.use_rgb,
-        #                 use_depth=args.use_depth,
-        #                 norm=args.norm)
+        model = MMSNetForPatchedRGBDForCL(num_classes=self.nclass,
+                        backbone=args.backbone,
+                        output_stride=args.out_stride,
+                        sync_bn=args.sync_bn,
+                        freeze_bn=args.freeze_bn,
+                        use_rgb=args.use_rgb,
+                        use_depth=args.use_depth,
+                        norm=args.norm,
+                        is_teacher=False)
 
         print(model)
         pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -104,9 +109,11 @@ class TrainerMultimodalRGBD(object):
         # print(class_weighting.shape, class_weighting)
 
         self.criterion = SegmentationLosses(weight=weight, cuda=args.cuda).build_loss(mode=args.loss_type)
+        loss_fn = losses.NTXentLoss(temperature=0.1)
+        self.cl_loss = losses.SelfSupervisedLoss(loss_fn)
         # self.criterion = nn.CrossEntropyLoss(weight=class_weighting, ignore_index=args.ignore_index).cuda()
         # self.criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_index, reduction='mean').cuda()
-        self.model, self.optimizer = model, optimizer
+        self.model, self.optimizer, self.teacher_model = model, optimizer, teacher_model
         
         # Define Evaluator
         self.evaluator = Evaluator(self.nclass)
@@ -123,9 +130,16 @@ class TrainerMultimodalRGBD(object):
             self.model = torch.nn.DataParallel(self.model, device_ids=self.args.gpu_ids)
             self.model = self.model.cuda()
 
+            self.teacher_model = torch.nn.DataParallel(self.teacher_model, device_ids=self.args.gpu_ids)
+            self.teacher_model = self.teacher_model.cuda()
+
+        ## Load Checkpoint Start
+        checkpoint = torch.load(model_path)
+        self.teacher_model.module.load_state_dict(checkpoint['state_dict'])
+        ## Load Checkpoint End
+
         # Resuming checkpoint
         self.best_pred = 0.0
-        self.best_pred_2 = 0.0
         
         if args.resume is not None:
             if not os.path.isfile(args.resume):
@@ -141,6 +155,21 @@ class TrainerMultimodalRGBD(object):
             self.best_pred = checkpoint['best_pred']
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
+        # if True:
+        #     model_path = "run/SmallDataset/MMSNetAttn/experiment_0/MMSNetAttn-NYU-P64-B64-RGB-Avg-R50_best_test.pth.tar"
+        #     if not os.path.isfile(model_path):
+        #         raise RuntimeError("=> no checkpoint found at '{}'" .format(args.resume))
+        #     checkpoint = torch.load(model_path)
+        #     args.start_epoch = checkpoint['epoch']
+        #     if args.cuda:
+        #         self.model.module.load_state_dict(checkpoint['state_dict'])
+        #     else:
+        #         self.model.load_state_dict(checkpoint['state_dict'])
+        #     if not args.ft:
+        #         self.optimizer.load_state_dict(checkpoint['optimizer'])
+        #     self.best_pred = checkpoint['best_pred']
+        #     print("=> loaded checkpoint '{}' (epoch {})"
+        #           .format(args.resume, checkpoint['epoch']))
 
         # Clear start epoch if fine-tuning
         if args.ft:
@@ -157,7 +186,7 @@ class TrainerMultimodalRGBD(object):
         for i, (images, labels) in enumerate(tbar):
             # image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
             # image, target, depth = sample['data'], sample['label'], sample['modal_x']
-            image, target, depth = images[0], labels, images[1]
+            image, target, depth, brgb, bgray = images[0], labels, images[1], images[2], images[3]
 
             if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
                 depth = depth.unsqueeze(1)
@@ -165,7 +194,7 @@ class TrainerMultimodalRGBD(object):
 
             if self.args.cuda:
                 # image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
+                image, target, depth, brgb, bgray = image.cuda(), target.cuda(), depth.cuda(), brgb.cuda(), bgray.cuda()
 
             self.scheduler(self.optimizer, i, epoch, self.best_pred)
             self.optimizer.zero_grad()
@@ -175,8 +204,12 @@ class TrainerMultimodalRGBD(object):
             
             with torch.cuda.amp.autocast():
                 # print(hha.shape)
-                output = self.model(rgb=rgb, depth=depth)
+                _, fused_feat_from_teacher, _, _ = self.teacher_model(rgb=rgb, depth=depth)
+                output, _, proj1, proj2 = self.model(rgb=bgray, depth=depth, x_ref=fused_feat_from_teacher)
                 loss = self.criterion(output, target)
+                # print(">--> Loss:", loss)
+                loss += self.cl_loss(proj2, proj1)
+                # print(">--> Loss:", loss)
                 # loss = self.criterion(output, target.long())
                 # print(loss)
             scaler.scale(loss).backward()
@@ -250,7 +283,7 @@ class TrainerMultimodalRGBD(object):
         for i, (images, labels) in enumerate(tbar):
             # image, target, depth, hha, depth3 = sample['image'], sample['label'], sample['depth'], sample['hha'], sample['depth3']
             # image, target, depth = sample['data'], sample['label'], sample['modal_x']
-            image, target, depth = images[0], labels, images[1]
+            image, target, depth, brgb, bgray = images[0], labels, images[1], images[2], images[3]
 
             if len(depth.shape) != 4:  # avoide automatic squeeze in later version of pytorch data loading
                 depth = depth.unsqueeze(1)
@@ -258,7 +291,7 @@ class TrainerMultimodalRGBD(object):
 
             if self.args.cuda:
                 # image, target, depth, hha, depth3 = image.cuda(), target.cuda(), depth.cuda(), hha.cuda(), depth3.cuda()
-                image, target, depth = image.cuda(), target.cuda(), depth.cuda()
+                image, target, depth, brgb, bgray = image.cuda(), target.cuda(), depth.cuda(), brgb.cuda(), bgray.cuda()
 
             rgb = image if self.args.use_rgb else None
             depth = depth if self.args.use_depth else None
@@ -266,8 +299,12 @@ class TrainerMultimodalRGBD(object):
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
                     # print(hha.shape)
-                    output = self.model(rgb=rgb, depth=depth)
+                    _, fused_feat_from_teacher, _, _ = self.teacher_model(rgb=rgb, depth=depth)
+                    output, _, proj1, proj2 = self.model(rgb=bgray, depth=depth, x_ref=fused_feat_from_teacher)
                     loss = self.criterion(output, target)
+                    # print(">--> Loss:", loss)
+                    loss += self.cl_loss(proj2, proj1)
+                    # print(">--> Loss:", loss)
                     # loss = self.criterion(output, target.long())
                     # loss = self.criterion(output, target)
             test_loss += loss.item()
@@ -317,9 +354,8 @@ class TrainerMultimodalRGBD(object):
         print('Loss: %.3f' % test_loss)
 
         new_pred = mIoU
-        if new_pred > self.best_pred_2:
+        if new_pred > self.best_pred:
             is_best = True
-            self.best_pred_2 = new_pred
             self.best_pred = new_pred
             self.saver.save_checkpoint({
                 'epoch': epoch + 1,
@@ -340,7 +376,7 @@ if __name__ == "__main__":
     parser.add_argument('--out-stride', type=int, default=16,
                         help='network output stride (default: 8)')
     parser.add_argument('--dataset', type=str, default='pascal',
-                        choices=['NYUDepthv2', 'nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
+                        choices=['SmallDataset', 'NYUDepthv2', 'nyuv2', 'pascal', 'coco', 'cityscapes', 'kitti', 'kitti_advanced', 'kitti_advanced_manta', 'handmade_dataset', 'handmade_dataset_stereo', 'multimodal_dataset'],
                         help='dataset name (default: pascal)')
     parser.add_argument('--model-name', type=str, default='DeeplabV3Plus-Unnamed',
                         help='Modle name for wandb and checkpoint (default: pascal)')
@@ -521,9 +557,9 @@ if __name__ == "__main__":
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
-    wandb.init(project="Material-Segmentation-MCubeS", entity="kaykobad", name=args.model_name)
+    wandb.init(project="PatchedSegmentation", entity="kaykobad", name=args.model_name)
 
-    trainer = TrainerMultimodalRGBD(args)
+    trainer = TrainerMultimodalRGBDForCL(args)
     # if args.is_multimodal:
     #     print("USE Multimodal Model")
     #     trainer = TrainerMultimodal(args)

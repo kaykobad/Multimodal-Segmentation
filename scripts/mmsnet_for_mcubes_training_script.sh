@@ -11,22 +11,22 @@
 
 conda activate mml
 
-CUDA_VISIBLE_DEVICES=0,1 python nyudv2_train.py \
-  --backbone resnet101 \
+CUDA_VISIBLE_DEVICES=0,1 python -m scripts.mmsnet_for_mcubes_train \
+  --backbone resnet \
   --lr 0.05 \
   --workers 1 \
-  --epochs 500 \
+  --epochs 1000 \
   --batch-size 8 \
   --ratio 3 \
   --gpu-ids 0,1 \
-  --checkname MMSNet \
-  --model-name MMSNet-New-NYU40-B8-RGB+HHA-Avg-R101 \
+  --checkname MMSNetWithAttn \
+  --model-name MMSNetWithAttn-M3S-B8-RGB+Nir+Pol-Max-Residue \
   --eval-interval 1 \
   --loss-type ce \
-  --dataset NYUDepthv2 \
+  --dataset multimodal_dataset \
   --list-folder list_folder \
   --use-pretrained-resnet \
   --is-multimodal \
-  --norm avg \
-  --use-rgb \
-  --use-depth 
+  --norm max \
+  --use-nir \
+  --use-pol
